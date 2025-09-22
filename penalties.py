@@ -33,7 +33,7 @@ def apply_penalties_two_rules_with_reason(
     threshold: float = 1440.0,
 ) -> pd.DataFrame:
     """
-    Rule 1: If any outage == 1440 (rounded) for a site → Penalty=1440 (exclude from Rule 2).
+    Rule 1: If any outage ≈1440 (1439–1441) for a site → Penalty=1440 (exclude site from Rule 2).
     Rule 2: For remaining sites, find midnight pairs (last on D + first on D+1) contiguous to midnight
             with pair_sum ≥ threshold. Set Penalty = pair_sum (rounded).
     """
@@ -53,9 +53,10 @@ def apply_penalties_two_rules_with_reason(
     # drop unusable
     out = out.dropna(subset=[vf_col, "_start_ts", "_end_ts", dur_col])
 
-    # --- Rule 1 ---
-    dur_rounded = out[dur_col].round()
-    sites_rule1 = out.loc[dur_rounded.eq(1440), vf_col].drop_duplicates()
+    # --- Rule 1 (tolerance around 1440) ---
+    dur_min = out[dur_col]
+    sites_rule1 = out.loc[dur_min.between(1439, 1441), vf_col].drop_duplicates()
+
     if not sites_rule1.empty:
         m1 = out[vf_col].isin(sites_rule1)
         out.loc[m1, penalty_col] = 1440
@@ -143,7 +144,7 @@ def apply_rule3_non_dhq(
 ) -> pd.DataFrame:
     """
     Only for rows where Penalty is blank & DHQ/Non DHQ == 'Non DHQ'.
-    Penalty = max( max single outage in [900,1440), strict midnight pair-sum ), if >= 900; else blank.
+    Penalty = max( max single outage in [900,1440), strict midnight pair-sum in [900,1440) ).
     """
     out = df_out.copy()
     out.columns = [str(c).strip() for c in out.columns]
@@ -162,8 +163,8 @@ def apply_rule3_non_dhq(
     slim[end_col]   = parse_excel_or_datetime(slim[end_col])
     slim[dur_col]   = pd.to_numeric(slim[dur_col], errors="coerce")
 
-    # A) max single in [900,1440)
-    single_mask = (slim[dur_col] >= 900) & (slim[dur_col] < 1440)
+    # A) max single in [900,1440) with tolerance
+    single_mask = (slim[dur_col] >= 900) & (slim[dur_col] < 1441)
     max_single = (
         slim.loc[single_mask]
             .groupby(vf_col)[dur_col]
@@ -219,11 +220,17 @@ def apply_rule3_non_dhq(
         r3_pair = pd.Series(dtype="Int64", name="R3_pair_sum")
 
     r3 = pd.concat([max_single, r3_pair], axis=1)
-    r3["Penalty_R3"] = r3.max(axis=1)
-    r3.loc[r3["Penalty_R3"] < 900, "Penalty_R3"] = pd.NA
+
+    # enforce tolerance [900,1440)
+    if "R3_pair_sum" in r3.columns:
+        r3.loc[(r3["R3_pair_sum"] < 900) | (r3["R3_pair_sum"] >= 1441), "R3_pair_sum"] = pd.NA
+    if "R3_single_max" in r3.columns:
+        r3.loc[(r3["R3_single_max"] < 900) | (r3["R3_single_max"] >= 1441), "R3_single_max"] = pd.NA
+
+    r3["Penalty_R3"] = r3[["R3_single_max", "R3_pair_sum"]].max(axis=1)
     r3["Penalty_R3"] = r3["Penalty_R3"].astype("Int64")
 
-    # SAFETY: preserve join key even if empty
+    # merge back
     r3.index.name = vf_col
     r3_reset = r3.reset_index()
     if vf_col not in r3_reset.columns:
@@ -232,8 +239,7 @@ def apply_rule3_non_dhq(
     out = out.merge(r3_reset[[vf_col, "Penalty_R3"]], on=vf_col, how="left")
     fill_mask = out[penalty_col].isna() & out["Penalty_R3"].notna()
     out.loc[fill_mask, penalty_col] = out.loc[fill_mask, "Penalty_R3"]
-    if reason_col in out.columns:
-        out.loc[fill_mask, reason_col] = "Rule3"
+    out.loc[fill_mask, reason_col]  = "Rule3"
 
     out.drop(columns=["Penalty_R3"], inplace=True)
     return out
@@ -257,7 +263,7 @@ def apply_rule4_dhq(
 ) -> pd.DataFrame:
     """
     Only for rows where Penalty is blank & DHQ/Non DHQ == 'DHQ'.
-    Penalty = max( max single outage in [420,1440), strict midnight pair-sum ), if >= 420; else blank.
+    Penalty = max( max single outage in [420,1440), strict midnight pair-sum in [420,1440) ).
     """
     out = df_out.copy()
     out.columns = [str(c).strip() for c in out.columns]
@@ -276,8 +282,8 @@ def apply_rule4_dhq(
     slim[end_col]   = parse_excel_or_datetime(slim[end_col])
     slim[dur_col]   = pd.to_numeric(slim[dur_col], errors="coerce")
 
-    # A) max single in [420,1440)
-    single_mask = (slim[dur_col] >= 420) & (slim[dur_col] < 1440)
+    # A) max single in [420,1440) with tolerance
+    single_mask = (slim[dur_col] >= 420) & (slim[dur_col] < 1441)
     max_single = (
         slim.loc[single_mask]
             .groupby(vf_col)[dur_col]
@@ -333,11 +339,17 @@ def apply_rule4_dhq(
         r4_pair = pd.Series(dtype="Int64", name="R4_pair_sum")
 
     r4 = pd.concat([max_single, r4_pair], axis=1)
-    r4["Penalty_R4"] = r4.max(axis=1)
-    r4.loc[r4["Penalty_R4"] < 420, "Penalty_R4"] = pd.NA
+
+    # enforce tolerance [420,1440)
+    if "R4_pair_sum" in r4.columns:
+        r4.loc[(r4["R4_pair_sum"] < 420) | (r4["R4_pair_sum"] >= 1441), "R4_pair_sum"] = pd.NA
+    if "R4_single_max" in r4.columns:
+        r4.loc[(r4["R4_single_max"] < 420) | (r4["R4_single_max"] >= 1441), "R4_single_max"] = pd.NA
+
+    r4["Penalty_R4"] = r4[["R4_single_max", "R4_pair_sum"]].max(axis=1)
     r4["Penalty_R4"] = r4["Penalty_R4"].astype("Int64")
 
-    # SAFETY: preserve join key even if empty
+    # merge back
     r4.index.name = vf_col
     r4_reset = r4.reset_index()
     if vf_col not in r4_reset.columns:
@@ -346,8 +358,7 @@ def apply_rule4_dhq(
     out = out.merge(r4_reset[[vf_col, "Penalty_R4"]], on=vf_col, how="left")
     fill_mask = out[penalty_col].isna() & out["Penalty_R4"].notna()
     out.loc[fill_mask, penalty_col] = out.loc[fill_mask, "Penalty_R4"]
-    if reason_col in out.columns:
-        out.loc[fill_mask, reason_col] = "Rule4"
+    out.loc[fill_mask, reason_col]  = "Rule4"
 
     out.drop(columns=["Penalty_R4"], inplace=True)
     return out
